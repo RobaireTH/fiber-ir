@@ -1,0 +1,19 @@
+{
+  "name": "@fiber-ir/api",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/server.js",
+  "types": "dist/server.d.ts",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@fiber-ir/classifier": "0.1.0",
+    "@fiber-ir/collector": "0.1.0",
+    "@fiber-ir/shared": "0.1.0",
+    "fastify": "^5.0.0",
+    "ulid": "^2.3.0"
+  }
+}

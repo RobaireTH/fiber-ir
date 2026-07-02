@@ -1,0 +1,13 @@
+{
+  "name": "@fiber-ir/examples",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "demo:fixture": "tsx demo-fixture.ts"
+  },
+  "dependencies": {
+    "@fiber-ir/collector": "0.1.0",
+    "@fiber-ir/sdk": "0.1.0",
+    "@fiber-ir/shared": "0.1.0"
+  }
+}

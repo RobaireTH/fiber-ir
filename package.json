@@ -1,0 +1,30 @@
+{
+  "name": "fiber-incident-recorder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "classifier",
+    "collector",
+    "api",
+    "sdk/ts",
+    "dashboard",
+    "examples"
+  ],
+  "scripts": {
+    "dev:api": "npm --workspace @fiber-ir/api run dev",
+    "dev:dashboard": "npm --workspace @fiber-ir/dashboard run dev",
+    "demo:fixture": "npm --workspace @fiber-ir/examples run demo:fixture",
+    "typecheck": "tsc -b",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

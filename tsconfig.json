@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./shared" },
+    { "path": "./classifier" },
+    { "path": "./collector" },
+    { "path": "./api" },
+    { "path": "./sdk/ts" },
+    { "path": "./dashboard" },
+    { "path": "./examples" }
+  ]
+}
