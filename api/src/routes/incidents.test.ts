@@ -1,0 +1,425 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import Fastify, { type FastifyInstance } from "fastify";
+import { afterEach, describe, expect, it } from "vitest";
+import type { FiberIncidentEventV1, IncidentRecord, IncidentStatus } from "@fiber-ir/shared";
+import { buildServer } from "../server.js";
+import { JsonFileIncidentRepository, type IncidentRepository, type IngestResult } from "../store/incidents-repo.js";
+import { registerEventRoutes } from "./events.js";
+import { registerIncidentRoutes } from "./incidents.js";
+
+type ListResponse = {
+  items: IncidentRecord[];
+  nextCursor: null;
+};
+
+type SummaryResponse = {
+  total: number;
+  open: number;
+  highSeverity: number;
+  resolved: number;
+};
+
+const apps: FastifyInstance[] = [];
+const tempDirs: string[] = [];
+
+afterEach(async () => {
+  for (const app of apps.splice(0)) {
+    await app.close();
+  }
+
+  for (const tempDir of tempDirs.splice(0)) {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+describe("incident API routes", () => {
+  it("ingests a failed payment event, deduplicates repeats, and exposes list/detail/summary", async () => {
+    const app = await testServer();
+    const event = paymentAttemptFailedEvent({
+      eventId: "evt_no_route_001",
+      observedAt: "2026-07-07T10:00:00.000Z",
+      paymentId: "pay_no_route_001",
+      invoiceId: "inv_no_route_001"
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      payload: event
+    });
+
+    expect(created.statusCode).toBe(201);
+    const createdBody = json<IngestResult>(created);
+    expect(createdBody).toMatchObject({
+      eventId: "evt_no_route_001",
+      action: "created",
+      incidentId: "inc_no_route_001"
+    });
+    expect(createdBody.incident).toMatchObject({
+      id: "inc_no_route_001",
+      paymentId: "pay_no_route_001",
+      invoiceId: "inv_no_route_001",
+      incidentStatus: "OPEN",
+      normalizedClass: "NO_ROUTE",
+      severity: "HIGH"
+    });
+
+    const duplicate = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      payload: event
+    });
+
+    expect(duplicate.statusCode).toBe(200);
+    expect(json<IngestResult>(duplicate)).toEqual({
+      eventId: "evt_no_route_001",
+      action: "deduplicated"
+    });
+
+    const list = await app.inject({ method: "GET", url: "/v1/incidents" });
+    expect(list.statusCode).toBe(200);
+    const listBody = json<ListResponse>(list);
+    expect(listBody.nextCursor).toBeNull();
+    expect(listBody.items).toHaveLength(1);
+    expect(listBody.items[0]?.id).toBe("inc_no_route_001");
+
+    const detail = await app.inject({ method: "GET", url: "/v1/incidents/inc_no_route_001" });
+    expect(detail.statusCode).toBe(200);
+    expect(json<IncidentRecord>(detail)).toMatchObject({
+      id: "inc_no_route_001",
+      rawError: {
+        failed_error: "no route found"
+      },
+      redactedPayload: {
+        error: {
+          raw: "[redacted]"
+        }
+      }
+    });
+
+    const summary = await app.inject({ method: "GET", url: "/v1/stats/summary" });
+    expect(summary.statusCode).toBe(200);
+    expect(json<SummaryResponse>(summary)).toEqual({
+      total: 1,
+      open: 1,
+      highSeverity: 1,
+      resolved: 0
+    });
+  });
+
+  it("patches incident status and filters the incident list by status", async () => {
+    const app = await testServer();
+    await postEvent(
+      app,
+      paymentAttemptFailedEvent({
+        eventId: "evt_retrying_001",
+        observedAt: "2026-07-07T11:00:00.000Z",
+        paymentId: "pay_retrying_001"
+      })
+    );
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: "/v1/incidents/inc_retrying_001",
+      payload: {
+        incidentStatus: "RETRYING" satisfies IncidentStatus,
+        resolutionNote: "Retry scheduled by operator."
+      }
+    });
+
+    expect(patched.statusCode).toBe(200);
+    expect(json<IncidentRecord>(patched)).toMatchObject({
+      id: "inc_retrying_001",
+      incidentStatus: "RETRYING",
+      resolutionNote: "Retry scheduled by operator."
+    });
+
+    const retrying = await app.inject({ method: "GET", url: "/v1/incidents?status=RETRYING" });
+    expect(retrying.statusCode).toBe(200);
+    const retryingBody = json<ListResponse>(retrying);
+    expect(retryingBody.items.map((incident) => incident.id)).toEqual(["inc_retrying_001"]);
+
+    const open = await app.inject({ method: "GET", url: "/v1/incidents?status=OPEN" });
+    expect(open.statusCode).toBe(200);
+    expect(json<ListResponse>(open).items).toEqual([]);
+  });
+
+  it("rejects invalid incident status patches", async () => {
+    const app = await testServer();
+    await postEvent(
+      app,
+      paymentAttemptFailedEvent({
+        eventId: "evt_bad_status_001",
+        observedAt: "2026-07-07T11:30:00.000Z",
+        paymentId: "pay_bad_status_001"
+      })
+    );
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: "/v1/incidents/inc_bad_status_001",
+      payload: {
+        incidentStatus: "CLOSED"
+      }
+    });
+
+    expect(patched.statusCode).toBe(400);
+    expect(json<{ error: string }>(patched)).toMatchObject({
+      error: "Invalid incidentStatus"
+    });
+  });
+
+  it("resolves an open incident when a linked payment_succeeded event arrives", async () => {
+    const app = await testServer();
+    await postEvent(
+      app,
+      paymentAttemptFailedEvent({
+        eventId: "evt_linked_failure_001",
+        observedAt: "2026-07-07T12:00:00.000Z",
+        paymentId: "pay_linked_001",
+        invoiceId: "inv_linked_001"
+      })
+    );
+
+    const resolved = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      payload: paymentSucceededEvent({
+        eventId: "evt_linked_success_001",
+        observedAt: "2026-07-07T12:02:00.000Z",
+        paymentId: "pay_linked_001",
+        invoiceId: "inv_linked_001"
+      })
+    });
+
+    expect(resolved.statusCode).toBe(200);
+    expect(json<IngestResult>(resolved)).toMatchObject({
+      eventId: "evt_linked_success_001",
+      action: "updated",
+      incidentId: "inc_linked_failure_001",
+      incident: {
+        id: "inc_linked_failure_001",
+        fiberPaymentStatus: "Success",
+        incidentStatus: "RESOLVED",
+        resolutionNote: "Resolved by linked payment_succeeded event."
+      }
+    });
+
+    const detail = await app.inject({ method: "GET", url: "/v1/incidents/inc_linked_failure_001" });
+    expect(detail.statusCode).toBe(200);
+    expect(json<IncidentRecord>(detail)).toMatchObject({
+      incidentStatus: "RESOLVED",
+      fiberPaymentStatus: "Success"
+    });
+
+    const summary = await app.inject({ method: "GET", url: "/v1/stats/summary" });
+    expect(summary.statusCode).toBe(200);
+    expect(json<SummaryResponse>(summary)).toEqual({
+      total: 1,
+      open: 0,
+      highSeverity: 1,
+      resolved: 1
+    });
+  });
+
+  it("stores non-incident events without creating incidents", async () => {
+    const app = await testServer();
+
+    const stored = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      payload: paymentSucceededEvent({
+        eventId: "evt_unmatched_success_001",
+        observedAt: "2026-07-07T13:00:00.000Z",
+        paymentId: "pay_unmatched_001"
+      })
+    });
+
+    expect(stored.statusCode).toBe(200);
+    expect(json<IngestResult>(stored)).toEqual({
+      eventId: "evt_unmatched_success_001",
+      action: "stored"
+    });
+
+    const list = await app.inject({ method: "GET", url: "/v1/incidents" });
+    expect(json<ListResponse>(list).items).toEqual([]);
+  });
+
+  it("can run the API against a JSON-file repository and preserve dedupe across reload", async () => {
+    const storeFile = tempStoreFile();
+    const event = paymentAttemptFailedEvent({
+      eventId: "evt_file_store_001",
+      observedAt: "2026-07-07T13:30:00.000Z",
+      paymentId: "pay_file_store_001"
+    });
+    const firstApp = await testServer(new JsonFileIncidentRepository(storeFile));
+
+    await postEvent(firstApp, event);
+
+    const reloadedApp = await testServer(new JsonFileIncidentRepository(storeFile));
+    const duplicate = await reloadedApp.inject({
+      method: "POST",
+      url: "/v1/events",
+      payload: event
+    });
+
+    expect(duplicate.statusCode).toBe(200);
+    expect(json<IngestResult>(duplicate)).toEqual({
+      eventId: "evt_file_store_001",
+      action: "deduplicated"
+    });
+
+    const list = await reloadedApp.inject({ method: "GET", url: "/v1/incidents" });
+    expect(json<ListResponse>(list).items.map((incident) => incident.id)).toEqual(["inc_file_store_001"]);
+  });
+
+  it("registers routes against the repository interface instead of the in-memory class", async () => {
+    const app = Fastify({ logger: false });
+    apps.push(app);
+    const fakeRepo: IncidentRepository = {
+      ingestEvent(event) {
+        return { eventId: event.eventId, action: "stored" };
+      },
+      list() {
+        return [];
+      },
+      get() {
+        return undefined;
+      },
+      updateStatus() {
+        return undefined;
+      },
+      summary() {
+        return {
+          total: 0,
+          open: 0,
+          highSeverity: 0,
+          resolved: 0
+        };
+      }
+    };
+
+    await registerEventRoutes(app, fakeRepo);
+    await registerIncidentRoutes(app, fakeRepo);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      payload: paymentSucceededEvent({
+        eventId: "evt_fake_repo_001",
+        observedAt: "2026-07-07T14:00:00.000Z",
+        paymentId: "pay_fake_repo_001"
+      })
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(json<IngestResult>(response)).toEqual({
+      eventId: "evt_fake_repo_001",
+      action: "stored"
+    });
+  });
+});
+
+async function testServer(repo?: IncidentRepository): Promise<FastifyInstance> {
+  const app = await buildServer({ logger: false, repo });
+  apps.push(app);
+  return app;
+}
+
+function tempStoreFile(): string {
+  const tempDir = mkdtempSync(join(tmpdir(), "fiber-ir-api-"));
+  tempDirs.push(tempDir);
+  return join(tempDir, "store.json");
+}
+
+async function postEvent(app: FastifyInstance, event: FiberIncidentEventV1): Promise<IngestResult> {
+  const response = await app.inject({
+    method: "POST",
+    url: "/v1/events",
+    payload: event
+  });
+
+  expect(response.statusCode).toBe(201);
+  return json<IngestResult>(response);
+}
+
+function paymentAttemptFailedEvent(input: {
+  eventId: string;
+  observedAt: string;
+  paymentId: string;
+  invoiceId?: string;
+}): FiberIncidentEventV1 {
+  return {
+    schemaVersion: "fiber-ir.event.v1",
+    eventId: input.eventId,
+    observedAt: input.observedAt,
+    source: "fixture_replay",
+    projectId: "test-project",
+    environment: "testnet",
+    kind: "payment_attempt_failed",
+    provenance: {
+      payment: "fixture",
+      error: "fixture",
+      routeSummary: "fixture",
+      normalizedClass: "inferred"
+    },
+    payment: {
+      paymentId: input.paymentId,
+      invoiceId: input.invoiceId,
+      senderNode: "alice-node",
+      destinationNode: "bob-node",
+      fiberPaymentStatus: "Failed",
+      asset: "CKB",
+      amount: "10000"
+    },
+    attempt: {
+      correlationId: `${input.paymentId}-correlation`,
+      retryCount: 0,
+      routeSummary: {
+        routers: [],
+        failureSource: "unknown"
+      }
+    },
+    error: {
+      message: "no route found",
+      raw: {
+        failed_error: "no route found"
+      }
+    }
+  };
+}
+
+function paymentSucceededEvent(input: {
+  eventId: string;
+  observedAt: string;
+  paymentId: string;
+  invoiceId?: string;
+}): FiberIncidentEventV1 {
+  return {
+    schemaVersion: "fiber-ir.event.v1",
+    eventId: input.eventId,
+    observedAt: input.observedAt,
+    source: "fixture_replay",
+    projectId: "test-project",
+    environment: "testnet",
+    kind: "payment_succeeded",
+    provenance: {
+      payment: "fixture"
+    },
+    payment: {
+      paymentId: input.paymentId,
+      invoiceId: input.invoiceId,
+      senderNode: "alice-node",
+      destinationNode: "bob-node",
+      fiberPaymentStatus: "Success",
+      asset: "CKB",
+      amount: "10000"
+    }
+  };
+}
+
+function json<T>(response: { payload: string }): T {
+  return JSON.parse(response.payload) as T;
+}
