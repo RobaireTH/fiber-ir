@@ -35,6 +35,27 @@ afterEach(async () => {
 });
 
 describe("incident API routes", () => {
+  it("rejects invalid event payloads", async () => {
+    const app = await testServer();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      payload: {
+        schemaVersion: "fiber-ir.event.v1",
+        eventId: "evt_invalid_payload_001",
+        observedAt: "not-a-date",
+        source: "fiber_rpc",
+        kind: "payment_attempt_failed"
+      }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(json<{ error: string; issues: unknown[] }>(response)).toMatchObject({
+      error: "Invalid fiber-ir.event.v1 payload"
+    });
+  });
+
   it("ingests a failed payment event, deduplicates repeats, and exposes list/detail/summary", async () => {
     const app = await testServer();
     const event = paymentAttemptFailedEvent({
@@ -171,6 +192,35 @@ describe("incident API routes", () => {
     });
   });
 
+  it("filters the incident list by normalized class", async () => {
+    const app = await testServer();
+    await postEvent(
+      app,
+      paymentAttemptFailedEvent({
+        eventId: "evt_class_no_route_001",
+        observedAt: "2026-07-07T11:40:00.000Z",
+        paymentId: "pay_class_no_route_001",
+        errorMessage: "no route found"
+      })
+    );
+    await postEvent(
+      app,
+      paymentAttemptFailedEvent({
+        eventId: "evt_class_invoice_expired_001",
+        observedAt: "2026-07-07T11:41:00.000Z",
+        paymentId: "pay_class_invoice_expired_001",
+        errorMessage: "invoice expired"
+      })
+    );
+
+    const filtered = await app.inject({ method: "GET", url: "/v1/incidents?class=INVOICE_EXPIRED" });
+
+    expect(filtered.statusCode).toBe(200);
+    const body = json<ListResponse>(filtered);
+    expect(body.items.map((incident) => incident.id)).toEqual(["inc_class_invoice_expired_001"]);
+    expect(body.items[0]?.normalizedClass).toBe("INVOICE_EXPIRED");
+  });
+
   it("resolves an open incident when a linked payment_succeeded event arrives", async () => {
     const app = await testServer();
     await postEvent(
@@ -224,17 +274,56 @@ describe("incident API routes", () => {
     });
   });
 
-  it("stores non-incident events without creating incidents", async () => {
+  it("resolves an open incident by invoice when the succeeding payment id changes", async () => {
     const app = await testServer();
+    await postEvent(
+      app,
+      paymentAttemptFailedEvent({
+        eventId: "evt_invoice_linked_failure_001",
+        observedAt: "2026-07-07T12:10:00.000Z",
+        paymentId: "pay_invoice_linked_original_001",
+        invoiceId: "inv_invoice_linked_001"
+      })
+    );
+
+    const resolved = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      payload: paymentSucceededEvent({
+        eventId: "evt_invoice_linked_success_001",
+        observedAt: "2026-07-07T12:12:00.000Z",
+        paymentId: "pay_invoice_linked_replacement_001",
+        invoiceId: "inv_invoice_linked_001"
+      })
+    });
+
+    expect(resolved.statusCode).toBe(200);
+    expect(json<IngestResult>(resolved)).toMatchObject({
+      eventId: "evt_invoice_linked_success_001",
+      action: "updated",
+      incidentId: "inc_invoice_linked_failure_001",
+      incident: {
+        id: "inc_invoice_linked_failure_001",
+        paymentId: "pay_invoice_linked_original_001",
+        invoiceId: "inv_invoice_linked_001",
+        fiberPaymentStatus: "Success",
+        incidentStatus: "RESOLVED"
+      }
+    });
+  });
+
+  it("stores duplicate non-incident events once without creating incidents", async () => {
+    const app = await testServer();
+    const event = paymentSucceededEvent({
+      eventId: "evt_unmatched_success_001",
+      observedAt: "2026-07-07T13:00:00.000Z",
+      paymentId: "pay_unmatched_001"
+    });
 
     const stored = await app.inject({
       method: "POST",
       url: "/v1/events",
-      payload: paymentSucceededEvent({
-        eventId: "evt_unmatched_success_001",
-        observedAt: "2026-07-07T13:00:00.000Z",
-        paymentId: "pay_unmatched_001"
-      })
+      payload: event
     });
 
     expect(stored.statusCode).toBe(200);
@@ -243,11 +332,54 @@ describe("incident API routes", () => {
       action: "stored"
     });
 
+    const duplicate = await app.inject({
+      method: "POST",
+      url: "/v1/events",
+      payload: event
+    });
+
+    expect(duplicate.statusCode).toBe(200);
+    expect(json<IngestResult>(duplicate)).toEqual({
+      eventId: "evt_unmatched_success_001",
+      action: "deduplicated"
+    });
+
     const list = await app.inject({ method: "GET", url: "/v1/incidents" });
     expect(json<ListResponse>(list).items).toEqual([]);
   });
 
-  it("can run the API against a JSON-file repository and preserve dedupe across reload", async () => {
+  it("does not leak raw secrets in redactedPayload", async () => {
+    const app = await testServer();
+    await postEvent(
+      app,
+      paymentAttemptFailedEvent({
+        eventId: "evt_redacted_secret_001",
+        observedAt: "2026-07-07T13:10:00.000Z",
+        paymentId: "pay_redacted_secret_001",
+        rawError: {
+          code: -32601,
+          message: "Method not found",
+          data: {
+            method: "send_payment",
+            token: "secret-token"
+          }
+        }
+      })
+    );
+
+    const detail = await app.inject({ method: "GET", url: "/v1/incidents/inc_redacted_secret_001" });
+
+    expect(detail.statusCode).toBe(200);
+    const incident = json<IncidentRecord>(detail);
+    expect(incident.redactedPayload).toMatchObject({
+      error: {
+        raw: "[redacted]"
+      }
+    });
+    expect(JSON.stringify(incident.redactedPayload)).not.toContain("secret-token");
+  });
+
+  it("can run the API against a JSON-file repository and preserve dedupe and resolved status across reload", async () => {
     const storeFile = tempStoreFile();
     const event = paymentAttemptFailedEvent({
       eventId: "evt_file_store_001",
@@ -257,6 +389,16 @@ describe("incident API routes", () => {
     const firstApp = await testServer(new JsonFileIncidentRepository(storeFile));
 
     await postEvent(firstApp, event);
+    const resolved = await firstApp.inject({
+      method: "PATCH",
+      url: "/v1/incidents/inc_file_store_001",
+      payload: {
+        incidentStatus: "RESOLVED" satisfies IncidentStatus,
+        resolutionNote: "Resolved before API restart."
+      }
+    });
+
+    expect(resolved.statusCode).toBe(200);
 
     const reloadedApp = await testServer(new JsonFileIncidentRepository(storeFile));
     const duplicate = await reloadedApp.inject({
@@ -272,7 +414,13 @@ describe("incident API routes", () => {
     });
 
     const list = await reloadedApp.inject({ method: "GET", url: "/v1/incidents" });
-    expect(json<ListResponse>(list).items.map((incident) => incident.id)).toEqual(["inc_file_store_001"]);
+    expect(json<ListResponse>(list).items).toMatchObject([
+      {
+        id: "inc_file_store_001",
+        incidentStatus: "RESOLVED",
+        resolutionNote: "Resolved before API restart."
+      }
+    ]);
   });
 
   it("registers routes against the repository interface instead of the in-memory class", async () => {
@@ -350,7 +498,11 @@ function paymentAttemptFailedEvent(input: {
   observedAt: string;
   paymentId: string;
   invoiceId?: string;
+  errorMessage?: string;
+  rawError?: unknown;
 }): FiberIncidentEventV1 {
+  const errorMessage = input.errorMessage ?? "no route found";
+
   return {
     schemaVersion: "fiber-ir.event.v1",
     eventId: input.eventId,
@@ -383,9 +535,9 @@ function paymentAttemptFailedEvent(input: {
       }
     },
     error: {
-      message: "no route found",
-      raw: {
-        failed_error: "no route found"
+      message: errorMessage,
+      raw: input.rawError ?? {
+        failed_error: errorMessage
       }
     }
   };
