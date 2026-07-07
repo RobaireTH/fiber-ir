@@ -625,6 +625,10 @@ class ApiResponseError extends Error {
 }
 
 async function fetchDashboardData(signal: AbortSignal): Promise<DashboardData> {
+  if (isDemoMode()) {
+    return createFixtureData("Demo mode is showing local fixture incidents.");
+  }
+
   const [incidentsPayload, summaryPayload] = await Promise.all([
     requestJson("/v1/incidents", signal),
     requestJson("/v1/stats/summary", signal)
@@ -814,6 +818,12 @@ function summarizeRawError(value: unknown): string {
   if (record) {
     const message = textValue(record.message, "");
     if (message) return message;
+
+    const failedError = textValue(record.failed_error, "");
+    if (failedError) return failedError;
+
+    const error = textValue(record.error, "");
+    if (error) return error;
   }
 
   if (value === null || value === undefined) return "";
@@ -867,7 +877,11 @@ function isAbortError(error: unknown): boolean {
 
 function isUnavailableHttpResponse(status: number, body: string): boolean {
   if (status === 502 || status === 503 || status === 504) return true;
-  return status === 500 && /proxy|econnrefused|socket hang up|fetch failed/i.test(body);
+  return status === 500 || /proxy|econnrefused|socket hang up|fetch failed/i.test(body);
+}
+
+function isDemoMode(): boolean {
+  return new URLSearchParams(window.location.search).get("demo") === "1";
 }
 
 function cssToken(value: string): string {
