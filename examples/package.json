@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "demo:fixture": "tsx demo-fixture.ts"
+    "demo:local": "tsx demo-local.ts",
+    "demo:fixture": "tsx demo-fixture.ts",
+    "fnn:probe": "tsx fnn-probe.ts"
   },
   "dependencies": {
     "@fiber-ir/collector": "0.1.0",

@@ -15,7 +15,9 @@
   "scripts": {
     "dev:api": "npm --workspace @fiber-ir/api run dev",
     "dev:dashboard": "npm --workspace @fiber-ir/dashboard run dev",
+    "demo:local": "npm --workspace @fiber-ir/examples run demo:local",
     "demo:fixture": "npm --workspace @fiber-ir/examples run demo:fixture",
+    "fnn:probe": "npm --workspace @fiber-ir/examples run fnn:probe",
     "typecheck": "tsc -b",
     "test": "vitest run"
   },

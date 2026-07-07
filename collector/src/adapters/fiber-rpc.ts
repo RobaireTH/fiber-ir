@@ -18,6 +18,7 @@ export type FiberRpcHttpClientOptions = {
 
 export type FiberRpcEnv = {
   FIBER_RPC_URL?: string;
+  FIBER_RPC_AUTH_HEADER?: string;
 };
 
 export type FiberRpcSnapshot = {
@@ -26,6 +27,32 @@ export type FiberRpcSnapshot = {
   peers: unknown;
   channels: unknown;
   provenance: Record<"nodeInfo" | "peers" | "channels", Provenance>;
+};
+
+export type FiberRpcPaymentStatus = "Created" | "Inflight" | "Success" | "Failed" | string;
+
+export type FiberRpcPayment = {
+  payment_hash?: string;
+  status?: FiberRpcPaymentStatus;
+  created_at?: string;
+  last_updated_at?: string;
+  failed_error?: string | null;
+  fee?: string;
+  custom_records?: unknown;
+  routers?: unknown;
+};
+
+export type FiberRpcListPaymentsResult = {
+  payments?: FiberRpcPayment[];
+  last_cursor?: string | null;
+};
+
+export type FiberRpcPaymentObservationOptions = {
+  pollIntervalMs?: number;
+  timeoutMs?: number;
+  maxPolls?: number;
+  delay?: (milliseconds: number) => Promise<void>;
+  now?: () => number;
 };
 
 export type WrappedPaymentInput = {
@@ -123,7 +150,10 @@ export function createFiberRpcClientFromEnv(
   env: FiberRpcEnv = defaultFiberRpcEnv()
 ): FiberJsonRpcHttpClient | null {
   const url = env.FIBER_RPC_URL?.trim();
-  return url ? new FiberJsonRpcHttpClient({ url }) : null;
+  const authHeader = env.FIBER_RPC_AUTH_HEADER?.trim();
+  const headers = authHeader ? { authorization: authHeader } : undefined;
+
+  return url ? new FiberJsonRpcHttpClient({ url, headers }) : null;
 }
 
 export class FiberRpcCollector {
@@ -138,7 +168,15 @@ export class FiberRpcCollector {
   }
 
   async listChannels<T = unknown>(): Promise<T> {
-    return this.rpc.call<T>({ method: "list_channels" });
+    return this.rpc.call<T>({ method: "list_channels", params: [{}] });
+  }
+
+  async getPayment<T = FiberRpcPayment>(paymentHash: string): Promise<T> {
+    return this.rpc.call<T>({ method: "get_payment", params: [{ payment_hash: paymentHash }] });
+  }
+
+  async listPayments<T = FiberRpcListPaymentsResult>(params: Record<string, unknown> = {}): Promise<T> {
+    return this.rpc.call<T>({ method: "list_payments", params: [params] });
   }
 
   async snapshotNodeHealth(): Promise<FiberRpcSnapshot> {
@@ -165,11 +203,112 @@ export class FiberRpcCollector {
     const method = input.method ?? "send_payment";
 
     try {
-      await this.rpc.call({ method, params: input.params });
-      return null;
+      const result = await this.rpc.call<FiberRpcPayment | null | undefined>({ method, params: input.params });
+      return this.paymentResultToEvent(input, result);
     } catch (error) {
       return this.paymentFailureToEvent(input, error);
     }
+  }
+
+  async sendPaymentAndObserve(
+    input: WrappedPaymentInput,
+    options: FiberRpcPaymentObservationOptions = {}
+  ): Promise<FiberIncidentEventV1 | null> {
+    const method = input.method ?? "send_payment";
+
+    try {
+      const submitted = await this.rpc.call<FiberRpcPayment | null | undefined>({ method, params: input.params });
+      const payment = submitted?.payment_hash
+        ? await this.waitForPaymentTerminal(submitted.payment_hash, options, submitted)
+        : submitted;
+
+      return this.paymentResultToEvent(input, payment);
+    } catch (error) {
+      return this.paymentFailureToEvent(input, error);
+    }
+  }
+
+  async waitForPaymentTerminal(
+    paymentHash: string,
+    options: FiberRpcPaymentObservationOptions = {},
+    initialPayment?: FiberRpcPayment
+  ): Promise<FiberRpcPayment> {
+    const pollIntervalMs = Math.max(0, options.pollIntervalMs ?? 1_000);
+    const timeoutMs = Math.max(0, options.timeoutMs ?? 30_000);
+    const startedAt = options.now?.() ?? Date.now();
+    const delay = options.delay ?? defaultDelay;
+    let polls = 0;
+    let payment = initialPayment;
+
+    while (true) {
+      if (payment && isTerminalPayment(payment)) {
+        return payment;
+      }
+
+      if (options.maxPolls !== undefined && polls >= options.maxPolls) {
+        return payment ?? (await this.getPayment(paymentHash));
+      }
+
+      const elapsed = (options.now?.() ?? Date.now()) - startedAt;
+      if (elapsed >= timeoutMs) {
+        return payment ?? (await this.getPayment(paymentHash));
+      }
+
+      if (polls > 0) {
+        await delay(pollIntervalMs);
+      }
+
+      payment = await this.getPayment(paymentHash);
+      polls += 1;
+    }
+  }
+
+  paymentResultToEvent(input: WrappedPaymentInput, payment: FiberRpcPayment | null | undefined): FiberIncidentEventV1 | null {
+    if (!payment) {
+      return null;
+    }
+
+    if (payment.status === "Failed") {
+      return this.paymentFailureToEvent(input, {
+        message: payment.failed_error ?? "Fiber payment failed",
+        raw: payment
+      });
+    }
+
+    if (payment.status === "Success") {
+      return this.paymentSuccessToEvent(input, payment);
+    }
+
+    return null;
+  }
+
+  paymentSuccessToEvent(input: WrappedPaymentInput, payment: FiberRpcPayment): FiberIncidentEventV1 {
+    return {
+      schemaVersion: "fiber-ir.event.v1",
+      eventId: input.eventId,
+      observedAt: input.observedAt ?? new Date().toISOString(),
+      source: "fiber_rpc",
+      projectId: input.projectId,
+      environment: input.environment ?? "testnet",
+      kind: "payment_succeeded",
+      provenance: {
+        payment: "live",
+        paymentStatus: "live",
+        rpcMethod: "live",
+        ...input.provenance
+      },
+      payment: {
+        paymentId: input.paymentId ?? payment.payment_hash,
+        invoiceId: input.invoiceId,
+        senderNode: input.senderNode,
+        destinationNode: input.destinationNode,
+        fiberPaymentStatus: "Success",
+        asset: input.asset,
+        amount: input.amount
+      },
+      attempt: input.attempt,
+      context: input.context
+    };
   }
 
   paymentFailureToEvent(input: WrappedPaymentInput, error: unknown): FiberIncidentEventV1 {
@@ -192,7 +331,7 @@ export class FiberRpcCollector {
         ...input.provenance
       },
       payment: {
-        paymentId: input.paymentId,
+        paymentId: input.paymentId ?? paymentHashFromError(error),
         invoiceId: input.invoiceId,
         senderNode: input.senderNode,
         destinationNode: input.destinationNode,
@@ -248,6 +387,13 @@ function normalizeRpcError(error: unknown): NonNullable<FiberIncidentEventV1["er
     };
   }
 
+  if (isObjectRecord(error) && typeof error.message === "string") {
+    return {
+      message: error.message,
+      raw: "raw" in error ? error.raw : error
+    };
+  }
+
   if (error instanceof Error) {
     return {
       message: error.message,
@@ -266,4 +412,21 @@ function normalizeRpcError(error: unknown): NonNullable<FiberIncidentEventV1["er
 
 function defaultFiberRpcEnv(): FiberRpcEnv {
   return typeof process === "undefined" ? {} : process.env;
+}
+
+function isTerminalPayment(payment: FiberRpcPayment): boolean {
+  return payment.status === "Success" || payment.status === "Failed";
+}
+
+function paymentHashFromError(error: unknown): string | undefined {
+  if (!isObjectRecord(error)) {
+    return undefined;
+  }
+
+  const raw = isObjectRecord(error.raw) ? error.raw : error;
+  return typeof raw.payment_hash === "string" ? raw.payment_hash : undefined;
+}
+
+function defaultDelay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

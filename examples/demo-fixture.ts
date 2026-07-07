@@ -111,19 +111,14 @@ const scenario: FixtureScenario = {
 const liveSnapshotResult = await tryLoadLiveSnapshot();
 const events = applyLiveSnapshot(replayFixture(scenario), liveSnapshotResult.snapshot);
 const recording = await recordEventsIfConfigured(events);
+const result = {
+  scenarioId: scenario.scenarioId,
+  title: scenario.title,
+  fiberRpc: liveSnapshotResult,
+  recording
+};
 
-console.log(
-  JSON.stringify(
-    {
-      scenarioId: scenario.scenarioId,
-      title: scenario.title,
-      fiberRpc: liveSnapshotResult,
-      recording
-    },
-    null,
-    2
-  )
-);
+console.log(JSON.stringify(process.env.FIR_DEMO_SUMMARY ? summarizeRun(result) : result, null, 2));
 
 function timestamp(offsetSeconds: number): string {
   return new Date(startedAt + offsetSeconds * 1000).toISOString();
@@ -223,4 +218,66 @@ async function recordEventsIfConfigured(events: FiberIncidentEventV1[]): Promise
     eventCount: events.length,
     results
   };
+}
+
+function summarizeRun(value: typeof result): Record<string, unknown> {
+  return {
+    scenarioId: value.scenarioId,
+    title: value.title,
+    fiberRpc: summarizeFiberRpc(value.fiberRpc),
+    recording: summarizeRecording(value.recording)
+  };
+}
+
+function summarizeFiberRpc(value: typeof liveSnapshotResult): Record<string, unknown> {
+  if (!value.configured) {
+    return { configured: false };
+  }
+
+  if (value.error) {
+    return { configured: true, error: value.error };
+  }
+
+  if (!value.snapshot) {
+    return { configured: true, error: "Live snapshot unavailable" };
+  }
+
+  const nodeInfo = asRecord(value.snapshot.nodeInfo);
+  const peers = asRecord(value.snapshot.peers);
+  const channels = asRecord(value.snapshot.channels);
+
+  return {
+    configured: true,
+    version: nodeInfo?.version,
+    peersCount: Array.isArray(peers?.peers) ? peers.peers.length : undefined,
+    channelsCount: Array.isArray(channels?.channels) ? channels.channels.length : undefined
+  };
+}
+
+function summarizeRecording(value: typeof recording): Record<string, unknown> {
+  if (value.mode === "stdout") {
+    return {
+      mode: value.mode,
+      eventCount: value.eventCount
+    };
+  }
+
+  return {
+    mode: value.mode,
+    apiUrl: value.apiUrl,
+    eventCount: value.eventCount,
+    actions: value.results.map((item) => {
+      const record = asRecord(item);
+      return {
+        eventId: record?.eventId,
+        action: record?.action,
+        incidentId: record?.incidentId,
+        status: asRecord(record?.incident)?.incidentStatus
+      };
+    })
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }

@@ -9,6 +9,10 @@ export type {
   FiberRpcClient,
   FiberRpcEnv,
   FiberRpcHttpClientOptions,
+  FiberRpcListPaymentsResult,
+  FiberRpcPaymentObservationOptions,
+  FiberRpcPayment,
+  FiberRpcPaymentStatus,
   FiberRpcRequest,
   FiberRpcSnapshot,
   WrappedPaymentInput
