@@ -1,10 +1,7 @@
 # Live Fiber Peer Transfer
 
 This repo has been verified against two real `nervos/fiber:0.9.0-rc7` Fiber
-Network Nodes running locally as separate peers. This document is the local
-two-peer proof. The hosted submission flow is now simpler: testers paste any
-Fiber invoice into `https://fiber-ir-604bdd.fly.dev/?section=demo`; the API asks
-the hosted sender node to `send_payment` and records the actual Fiber result.
+Network Nodes running locally as separate peers.
 
 The successful run used:
 
@@ -24,7 +21,7 @@ The successful run used:
 
 The resulting `payment_succeeded` event was posted to the hosted FiberIR API at
 `https://fiber-ir-604bdd.fly.dev/v1/events` and accepted with `action: "stored"`.
-The hosted dashboard exposes the invoice sender at
+The hosted dashboard also exposes a no-terminal tester flow at
 `https://fiber-ir-604bdd.fly.dev/?section=demo`.
 
 ## Notes

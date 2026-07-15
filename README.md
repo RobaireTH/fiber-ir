@@ -7,8 +7,8 @@ and retry/resolution state.
 
 The project does not replace upstream Fiber. Fiber remains the Rust
 payment-network implementation; this repo records and explains payment outcomes
-from wallet/merchant wrappers, fixture replay, and live Fiber JSON-RPC payment
-results.
+from wallet/merchant wrappers, fixture replay, and optional Fiber JSON-RPC
+snapshots.
 
 ## What It Shows
 
@@ -18,8 +18,7 @@ results.
 - A Fastify API for ingesting events, listing incidents, patching status, and
   reading summary stats.
 - A React dashboard for triage, remediation, provenance, and retry outcome.
-- A live invoice sender that calls Fiber `send_payment`, observes the terminal
-  result, and records it with provenance.
+- A live Fiber JSON-RPC probe for read-only FNN methods.
 
 ## Quick Demo
 
@@ -66,7 +65,7 @@ Deployment details are in `DEPLOYMENT.md`; the reviewer checklist is in
 `SUBMISSION.md`.
 
 Hosted demo: `https://fiber-ir-604bdd.fly.dev/`
-Tester invoice sender: `https://fiber-ir-604bdd.fly.dev/?section=demo`
+Tester peer-transfer demo: `https://fiber-ir-604bdd.fly.dev/?section=demo`
 
 ## Live Fiber Smoke
 
@@ -87,10 +86,11 @@ temporary unfunded testnet key. It confirmed:
 - `list_channels` returned an empty channel list
 - `list_payments` returned an empty payment list
 
-The hosted tester flow at `/?section=demo` accepts a Fiber invoice, sends it from
-the configured hosted sender node through Fiber `send_payment`, polls the payment
-state, and stores the live success or failure event in FiberIR. The raw FNN RPC
-stays private; only the FiberIR API is public.
+Funded payment/channel operations are intentionally outside the default demo.
+The funded two-peer path has also been verified; see
+`LIVE_PEER_TRANSFER.md`.
+The dashboard includes a no-terminal tester flow at `/?section=demo` that records
+the verified A to B transfer path through FiberIR.
 
 ## Architecture
 
@@ -151,6 +151,7 @@ operations:
 5. Let the API classify, store, expose, and resolve the incident lifecycle.
 
 The default local demo uses fixture payment attempts because it must be safe to
-run without funded testnet channels. The hosted demo path is real: the API calls
-Fiber JSON-RPC on the configured sender node, submits the provided invoice, and
-records the actual success or failure returned by the node.
+run without funded testnet channels. The live FNN path is real: the collector
+uses Fiber JSON-RPC methods and can observe terminal payment state when pointed
+at a funded Fiber node. Read-only smoke is included so reviewers can verify the
+FNN connection without moving funds.
