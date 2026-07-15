@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -189,6 +189,58 @@ describe("incident API routes", () => {
     expect(patched.statusCode).toBe(400);
     expect(json<{ error: string }>(patched)).toMatchObject({
       error: "Invalid incidentStatus"
+    });
+  });
+
+  it("runs the peer transfer demo and records the resolved FiberIR flow", async () => {
+    const app = await testServer();
+
+    const demo = await app.inject({
+      method: "POST",
+      url: "/v1/demo/peer-transfer"
+    });
+
+    expect(demo.statusCode).toBe(200);
+    const demoBody = json<{
+      mode: string;
+      payment: { hash: string; status: string };
+      steps: Array<{ id: string; status: string }>;
+      fiberIr: { results: IngestResult[] };
+    }>(demo);
+    expect(demoBody.mode).toBe("verified_replay");
+    expect(demoBody.payment).toMatchObject({
+      hash: "0x3c1d9d98bcdb9390a21011bb10f3f5f9c3af7299c56c9f47c72742f02c18c5b7",
+      status: "Success"
+    });
+    expect(demoBody.steps.map((step) => step.id)).toEqual([
+      "nodes",
+      "connect",
+      "channel",
+      "invoice",
+      "payment",
+      "fiber-ir"
+    ]);
+    expect(demoBody.fiberIr.results.map((result) => result.action)).toEqual(["created", "updated"]);
+
+    const list = await app.inject({ method: "GET", url: "/v1/incidents" });
+    expect(list.statusCode).toBe(200);
+    const listBody = json<ListResponse>(list);
+    expect(listBody.items).toHaveLength(1);
+    expect(listBody.items[0]).toMatchObject({
+      paymentId: "0x3c1d9d98bcdb9390a21011bb10f3f5f9c3af7299c56c9f47c72742f02c18c5b7",
+      fiberPaymentStatus: "Success",
+      incidentStatus: "RESOLVED",
+      normalizedClass: "CHANNEL_NOT_READY",
+      resolutionNote: "Resolved by linked payment_succeeded event."
+    });
+
+    const summary = await app.inject({ method: "GET", url: "/v1/stats/summary" });
+    expect(summary.statusCode).toBe(200);
+    expect(json<SummaryResponse>(summary)).toEqual({
+      total: 1,
+      open: 0,
+      highSeverity: 1,
+      resolved: 1
     });
   });
 
@@ -468,6 +520,71 @@ describe("incident API routes", () => {
       action: "stored"
     });
   });
+
+  it("adds CORS headers for configured origins and handles preflight requests", async () => {
+    const app = await configuredServer({
+      corsOrigin: "https://dashboard.example, http://localhost:5173"
+    });
+
+    const allowed = await app.inject({
+      method: "GET",
+      url: "/healthz",
+      headers: {
+        origin: "https://dashboard.example"
+      }
+    });
+    expect(allowed.statusCode).toBe(200);
+    expect(allowed.headers["access-control-allow-origin"]).toBe("https://dashboard.example");
+    expect(allowed.headers.vary).toBe("Origin");
+
+    const preflight = await app.inject({
+      method: "OPTIONS",
+      url: "/v1/incidents",
+      headers: {
+        origin: "http://localhost:5173",
+        "access-control-request-headers": "content-type,authorization"
+      }
+    });
+    expect(preflight.statusCode).toBe(204);
+    expect(preflight.headers["access-control-allow-methods"]).toContain("PATCH");
+    expect(preflight.headers["access-control-allow-headers"]).toBe("content-type,authorization");
+
+    const blocked = await app.inject({
+      method: "GET",
+      url: "/healthz",
+      headers: {
+        origin: "https://untrusted.example"
+      }
+    });
+    expect(blocked.statusCode).toBe(200);
+    expect(blocked.headers["access-control-allow-origin"]).toBeUndefined();
+  });
+
+  it("serves dashboard assets from a configured production build directory", async () => {
+    const dashboardDistDir = tempDashboardDist();
+    const app = await configuredServer({ dashboardDistDir });
+
+    const root = await app.inject({ method: "GET", url: "/" });
+    expect(root.statusCode).toBe(200);
+    expect(root.headers["content-type"]).toContain("text/html");
+    expect(root.payload).toContain("<div id=\"root\"></div>");
+
+    const asset = await app.inject({ method: "GET", url: "/assets/app.js" });
+    expect(asset.statusCode).toBe(200);
+    expect(asset.headers["content-type"]).toContain("text/javascript");
+    expect(asset.headers["cache-control"]).toContain("immutable");
+    expect(asset.payload).toBe("console.log('fiber-ir');");
+
+    const spaFallback = await app.inject({ method: "GET", url: "/incidents" });
+    expect(spaFallback.statusCode).toBe(200);
+    expect(spaFallback.payload).toContain("<div id=\"root\"></div>");
+
+    const missingAsset = await app.inject({ method: "GET", url: "/assets/missing.js" });
+    expect(missingAsset.statusCode).toBe(404);
+
+    const traversal = await app.inject({ method: "GET", url: "/%2e%2e/package.json" });
+    expect(traversal.statusCode).toBe(404);
+  });
 });
 
 async function testServer(repo?: IncidentRepository): Promise<FastifyInstance> {
@@ -476,10 +593,26 @@ async function testServer(repo?: IncidentRepository): Promise<FastifyInstance> {
   return app;
 }
 
+async function configuredServer(options: Omit<NonNullable<Parameters<typeof buildServer>[0]>, "logger">): Promise<FastifyInstance> {
+  const app = await buildServer({ logger: false, ...options });
+  apps.push(app);
+  return app;
+}
+
 function tempStoreFile(): string {
   const tempDir = mkdtempSync(join(tmpdir(), "fiber-ir-api-"));
   tempDirs.push(tempDir);
   return join(tempDir, "store.json");
+}
+
+function tempDashboardDist(): string {
+  const tempDir = mkdtempSync(join(tmpdir(), "fiber-ir-dashboard-"));
+  const assetsDir = join(tempDir, "assets");
+  tempDirs.push(tempDir);
+  mkdirSync(assetsDir, { recursive: true });
+  writeFileSync(join(tempDir, "index.html"), "<!doctype html><div id=\"root\"></div>", "utf8");
+  writeFileSync(join(assetsDir, "app.js"), "console.log('fiber-ir');", "utf8");
+  return tempDir;
 }
 
 async function postEvent(app: FastifyInstance, event: FiberIncidentEventV1): Promise<IngestResult> {

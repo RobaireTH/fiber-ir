@@ -1,0 +1,12 @@
+node_modules
+**/dist
+dashboard/dist
+.git
+.github
+.data
+.env
+.env.*
+.fly-token
+*.log
+coverage
+excalidraw.log
