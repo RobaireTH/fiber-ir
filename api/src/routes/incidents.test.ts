@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { FiberIncidentEventV1, IncidentRecord, IncidentStatus } from "@fiber-ir/shared";
 import { buildServer } from "../server.js";
 import { JsonFileIncidentRepository, type IncidentRepository, type IngestResult } from "../store/incidents-repo.js";
@@ -25,6 +25,14 @@ const apps: FastifyInstance[] = [];
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  delete process.env.FIR_DEMO_NODE_A_RPC_URL;
+  delete process.env.FIR_DEMO_NODE_A_P2P_ADDR;
+  delete process.env.FIR_DEMO_SENDER_RPC_URL;
+  delete process.env.FIR_DEMO_SENDER_P2P_ADDR;
+  delete process.env.FIR_DEMO_PAYMENT_TIMEOUT_MS;
+
   for (const app of apps.splice(0)) {
     await app.close();
   }
@@ -192,12 +200,12 @@ describe("incident API routes", () => {
     });
   });
 
-  it("runs the peer transfer demo and records the resolved FiberIR flow", async () => {
+  it("runs the verified replay demo and records the resolved FiberIR flow", async () => {
     const app = await testServer();
 
     const demo = await app.inject({
       method: "POST",
-      url: "/v1/demo/peer-transfer"
+      url: "/v1/demo/peer-transfer?replay=1"
     });
 
     expect(demo.statusCode).toBe(200);
@@ -241,6 +249,130 @@ describe("incident API routes", () => {
       open: 0,
       highSeverity: 1,
       resolved: 1
+    });
+  });
+
+  it("sends a provided invoice from the live sender node without creating a synthetic channel incident", async () => {
+    process.env.FIR_DEMO_SENDER_RPC_URL = "http://node-a";
+    process.env.FIR_DEMO_SENDER_P2P_ADDR = "/dns6/fiber-ir-node-a.internal/tcp/8228/p2p/QmNodeA";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body ?? "{}")) as { id: number; method: string };
+        const requestUrl = url.toString();
+        const result = liveDemoRpcResult(requestUrl, request.method);
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), {
+          headers: { "content-type": "application/json" }
+        });
+      })
+    );
+
+    const app = await testServer();
+    const demo = await app.inject({
+      method: "POST",
+      url: "/v1/demo/pay-invoice",
+      payload: {
+        invoice: "fibt1liveinvoice"
+      }
+    });
+
+    expect(demo.statusCode).toBe(200);
+    const demoBody = json<{
+      mode: string;
+      payment: { hash: string; status: string };
+      steps: Array<{ id: string; status: string }>;
+      fiberIr: { results: IngestResult[] };
+    }>(demo);
+    expect(demoBody.mode).toBe("live_invoice_payment");
+    expect(demoBody.payment).toEqual({
+      hash: "0xlivepayment",
+      status: "Success",
+      fee: "0x0"
+    });
+    expect(demoBody.steps.map((step) => step.id)).toEqual(["nodes", "invoice", "payment", "fiber-ir"]);
+    expect(demoBody.fiberIr.results).toEqual([
+      {
+        eventId: expect.stringMatching(/^evt_demo_peer_success_/),
+        action: "stored"
+      }
+    ]);
+
+    const list = await app.inject({ method: "GET", url: "/v1/incidents" });
+    expect(list.statusCode).toBe(200);
+    expect(json<ListResponse>(list).items).toEqual([]);
+
+    const summary = await app.inject({ method: "GET", url: "/v1/stats/summary" });
+    expect(summary.statusCode).toBe(200);
+    expect(json<SummaryResponse>(summary)).toEqual({
+      total: 0,
+      open: 0,
+      highSeverity: 0,
+      resolved: 0
+    });
+  });
+
+  it("records a real live invoice payment failure as an incident", async () => {
+    process.env.FIR_DEMO_SENDER_RPC_URL = "http://node-a";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body ?? "{}")) as { id: number; method: string };
+        const requestUrl = url.toString();
+        if (request.method === "send_payment") {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: request.id,
+              error: { code: -32603, message: "no route found for invoice recipient" }
+            }),
+            { headers: { "content-type": "application/json" } }
+          );
+        }
+
+        const result = liveDemoRpcResult(requestUrl, request.method);
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), {
+          headers: { "content-type": "application/json" }
+        });
+      })
+    );
+
+    const app = await testServer();
+    const demo = await app.inject({
+      method: "POST",
+      url: "/v1/demo/pay-invoice",
+      payload: {
+        invoice: "fibt1unreachableinvoice"
+      }
+    });
+
+    expect(demo.statusCode).toBe(200);
+    const demoBody = json<{
+      payment: { hash: string; status: string; failure: string };
+      fiberIr: { results: IngestResult[] };
+    }>(demo);
+    expect(demoBody.payment).toEqual({
+      hash: expect.stringMatching(/^live_invoice_/),
+      status: "Failed",
+      fee: "0x0",
+      failure: "no route found for invoice recipient"
+    });
+    expect(demoBody.fiberIr.results[0]).toMatchObject({
+      action: "created",
+      incidentId: expect.stringMatching(/^inc_demo_peer_failure_/)
+    });
+
+    const list = await app.inject({ method: "GET", url: "/v1/incidents" });
+    expect(list.statusCode).toBe(200);
+    const incidents = json<ListResponse>(list).items;
+    expect(incidents).toHaveLength(1);
+    expect(incidents[0]).toMatchObject({
+      normalizedClass: "NO_ROUTE",
+      rawError: {
+        status: "Failed",
+        failed_error: "no route found for invoice recipient"
+      }
     });
   });
 
@@ -703,6 +835,57 @@ function paymentSucceededEvent(input: {
       amount: "10000"
     }
   };
+}
+
+function liveDemoRpcResult(requestUrl: string, method: string): unknown {
+  const channel = {
+    channel_id: "0xlivechannel",
+    channel_outpoint: "0xliveoutpoint",
+    pubkey: "0xnodeb",
+    state: { state_name: "ChannelReady" },
+    local_balance: "0x5f5e100",
+    remote_balance: "0x5f5e100"
+  };
+
+  if (method === "node_info" && requestUrl === "http://node-a") {
+    return {
+      pubkey: "0xnodea",
+      node_name: "fiber-ir-fly-node-a",
+      addresses: ["/dns6/fiber-ir-node-a.internal/tcp/8228/p2p/QmNodeA"]
+    };
+  }
+
+  if (method === "node_info" && requestUrl === "http://node-b") {
+    return {
+      pubkey: "0xnodeb",
+      node_name: "fiber-ir-fly-node-b",
+      addresses: ["/dns6/fiber-ir-node-b.internal/tcp/8228/p2p/QmNodeB"]
+    };
+  }
+
+  if (method === "connect_peer") return null;
+  if (method === "list_channels") return { channels: [channel] };
+  if (method === "new_invoice") {
+    return {
+      invoice_address: "fibt1liveinvoice",
+      invoice: {
+        currency: "Fibt",
+        amount: "0xf4240",
+        data: {
+          payment_hash: "0xlivepayment"
+        }
+      }
+    };
+  }
+  if (method === "send_payment") {
+    return {
+      payment_hash: "0xlivepayment",
+      status: "Success",
+      fee: "0x0"
+    };
+  }
+
+  throw new Error(`Unexpected live demo RPC call ${method} to ${requestUrl}`);
 }
 
 function json<T>(response: { payload: string }): T {

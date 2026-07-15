@@ -16,7 +16,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -573,6 +574,36 @@ main {
   gap: 10px;
 }
 
+.invoice-entry {
+  width: min(520px, 100%);
+  display: grid;
+  gap: 6px;
+}
+
+.invoice-entry span {
+  color: #667384;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.invoice-entry textarea {
+  width: 100%;
+  min-height: 92px;
+  resize: vertical;
+  border: 1px solid #cbd3df;
+  border-radius: 8px;
+  padding: 10px;
+  color: #17202a;
+  background: #ffffff;
+  overflow-wrap: anywhere;
+}
+
+.invoice-entry textarea:focus {
+  outline: 2px solid #8eb8df;
+  outline-offset: 2px;
+}
+
 .demo-timeline,
 .demo-proof-list {
   display: grid;
@@ -653,6 +684,15 @@ main {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 13px;
   font-weight: 650;
+}
+
+.demo-failure {
+  border: 1px solid #efb4ad;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff1ef;
+  color: #8d251d;
+  overflow-wrap: anywhere;
 }
 
 .resolution-meter,

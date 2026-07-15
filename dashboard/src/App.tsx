@@ -95,7 +95,7 @@ type PeerDemoStep = {
 };
 
 type PeerDemoResult = {
-  mode: "verified_replay" | "live_probe";
+  mode: "verified_replay" | "live_invoice_payment";
   runId: string;
   nodes: {
     a: PeerDemoNode;
@@ -109,11 +109,13 @@ type PeerDemoResult = {
   invoice: {
     asset: string;
     amount: string;
+    address: string;
   };
   payment: {
     hash: string;
     status: string;
     fee: string;
+    failure: string;
   };
   steps: PeerDemoStep[];
   fiberIr: {
@@ -137,7 +139,7 @@ type PeerDemoNode = {
 
 type PeerDemoState =
   | { status: "idle" }
-  | { status: "running"; mode: "verified_replay" | "live_probe"; stepIndex: number }
+  | { status: "running"; mode: "verified_replay" | "live_invoice_payment"; stepIndex: number }
   | { status: "success"; result: PeerDemoResult }
   | { status: "error"; message: string };
 
@@ -251,46 +253,34 @@ const SECTION_COPY: Record<DashboardSection, { title: string; detail: string }> 
     detail: "Check API wiring, storage mode, event endpoints, and deployment runtime."
   },
   demo: {
-    title: "Peer transfer demo",
-    detail: "Run the A to B channel and payment flow through FiberIR."
+    title: "Invoice sender demo",
+    detail: "Send a provided Fiber invoice from the hosted node and record the live result."
   }
 };
 const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_FIR_API_BASE_URL);
 const DEFAULT_PEER_DEMO_STEPS: PeerDemoStep[] = [
   {
     id: "nodes",
-    title: "Fiber peers A and B",
-    detail: "Two Fiber Network Nodes are selected for the transfer.",
-    status: "pending"
-  },
-  {
-    id: "connect",
-    title: "Peer connection",
-    detail: "Node A connects to node B over Fiber P2P.",
-    status: "pending"
-  },
-  {
-    id: "channel",
-    title: "Channel opened",
-    detail: "A private one-way channel is opened and waits for readiness.",
+    title: "Hosted sender node",
+    detail: "The configured Fiber node answers node_info over private RPC.",
     status: "pending"
   },
   {
     id: "invoice",
-    title: "Invoice created on B",
-    detail: "Node B creates the payment invoice.",
+    title: "Invoice submitted",
+    detail: "The hosted node attempts send_payment for the provided invoice.",
     status: "pending"
   },
   {
     id: "payment",
-    title: "Payment sent from A to B",
-    detail: "Node A pays B through the ready channel.",
+    title: "Payment observed",
+    detail: "FiberIR polls the payment result and keeps the actual node status.",
     status: "pending"
   },
   {
     id: "fiber-ir",
     title: "FiberIR recorded the outcome",
-    detail: "FiberIR stores the failed preflight and resolves it with the success event.",
+    detail: "FiberIR stores the actual live payment result from the node.",
     status: "pending"
   }
 ];
@@ -305,6 +295,7 @@ function App() {
   const [actionState, setActionState] = useState<ActionState | null>(null);
   const [actionError, setActionError] = useState("");
   const [peerDemoState, setPeerDemoState] = useState<PeerDemoState>({ status: "idle" });
+  const [peerDemoInvoice, setPeerDemoInvoice] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -391,7 +382,13 @@ function App() {
     setReloadKey((key) => key + 1);
   }
 
-  async function runPeerDemo(mode: "verified_replay" | "live_probe") {
+  async function runPeerDemo(invoice: string, mode: "verified_replay" | "live_invoice_payment" = "live_invoice_payment") {
+    const trimmedInvoice = invoice.trim();
+    if (mode === "live_invoice_payment" && !trimmedInvoice) {
+      setPeerDemoState({ status: "error", message: "Paste a Fiber invoice before sending." });
+      return;
+    }
+
     setPeerDemoState({ status: "running", mode, stepIndex: 0 });
     setActionError("");
 
@@ -401,22 +398,22 @@ function App() {
         await wait(PEER_DEMO_STEP_DELAY_MS);
       }
 
-      const path = mode === "live_probe" ? "/v1/demo/peer-transfer?live=1" : "/v1/demo/peer-transfer";
-      const result = normalizePeerDemoResult(await postJson(path, {}));
+      const path = mode === "verified_replay" ? "/v1/demo/peer-transfer?replay=1" : "/v1/demo/pay-invoice";
+      const result = normalizePeerDemoResult(await postJson(path, { invoice: trimmedInvoice }));
       setPeerDemoState({ status: "success", result });
       reload();
     } catch (error) {
       setPeerDemoState({
         status: "error",
-        message: error instanceof Error ? error.message : "Unable to run the peer transfer demo."
+        message: error instanceof Error ? error.message : "Unable to send the invoice."
       });
     }
   }
 
-  function openDemoIncidentFeed() {
+  function openDemoIncidentFeed(result: PeerDemoResult) {
     reload();
     setSection("incidents");
-    setQuery("CHANNEL_NOT_READY");
+    setQuery(result.payment.hash);
   }
 
   return (
@@ -505,6 +502,8 @@ function App() {
             ) : section === "demo" ? (
               <PeerDemoView
                 dataSource={loadState.data.source}
+                invoice={peerDemoInvoice}
+                onInvoiceChange={setPeerDemoInvoice}
                 onOpenIncidentFeed={openDemoIncidentFeed}
                 onRun={runPeerDemo}
                 state={peerDemoState}
@@ -664,47 +663,60 @@ function IncidentWorkspace({
 
 function PeerDemoView({
   dataSource,
+  invoice,
+  onInvoiceChange,
   onOpenIncidentFeed,
   onRun,
   state
 }: {
   dataSource: DashboardSource;
-  onOpenIncidentFeed: () => void;
-  onRun: (mode: "verified_replay" | "live_probe") => void;
+  invoice: string;
+  onInvoiceChange: (invoice: string) => void;
+  onOpenIncidentFeed: (result: PeerDemoResult) => void;
+  onRun: (invoice: string, mode?: "verified_replay" | "live_invoice_payment") => void;
   state: PeerDemoState;
 }) {
   const busy = state.status === "running";
   const result = state.status === "success" ? state.result : null;
   const steps = stepsForPeerDemoState(state);
+  const invoiceReady = invoice.trim().length > 0;
   const flowState =
     state.status === "running"
       ? `running ${Math.min(state.stepIndex + 1, DEFAULT_PEER_DEMO_STEPS.length)}/${DEFAULT_PEER_DEMO_STEPS.length}`
       : result
-        ? result.mode.replace("_", " ")
+        ? result.mode.replaceAll("_", " ")
         : "not run";
+  const recordedIncident = result?.fiberIr.results.find((item) => item.incidentId);
 
   return (
-    <section className="peer-demo-grid" aria-label="Peer transfer demo">
+    <section className="peer-demo-grid" aria-label="Invoice sender demo">
       <article className="peer-demo-panel peer-demo-hero">
         <div>
           <div className="section-heading">
-            <strong>A to B transfer</strong>
+            <strong>Public invoice sender</strong>
             <span>{dataSource === "api" ? "FiberIR API" : "fixture view"}</span>
           </div>
-          <h2>Open channel, pay invoice, record outcome</h2>
+          <h2>Send any Fiber invoice and record the result</h2>
           <p>
-            Hosted testers get a guided verified replay of the completed A to B transfer. Local API environments can
-            probe already-running FNN peers with the live button.
+            The hosted node attempts the provided invoice through Fiber RPC. FiberIR records the actual success or
+            failure returned by the node.
           </p>
         </div>
         <div className="peer-demo-actions">
-          <button className="primary icon-button" disabled={busy} onClick={() => onRun("verified_replay")} type="button">
-            {busy && state.mode === "verified_replay" ? <Loader2 className="spin" size={16} /> : <PlayCircle size={16} />}
-            {busy && state.mode === "verified_replay" ? "Running flow" : "Run guided demo"}
-          </button>
-          <button className="secondary icon-button" disabled={busy} onClick={() => onRun("live_probe")} type="button">
-            {busy && state.mode === "live_probe" ? <Loader2 className="spin" size={16} /> : <Server size={16} />}
-            Probe live peers
+          <label className="invoice-entry">
+            <span>Fiber invoice</span>
+            <textarea
+              aria-label="Fiber invoice"
+              disabled={busy}
+              onChange={(event) => onInvoiceChange(event.target.value)}
+              placeholder="fibt1..."
+              rows={4}
+              value={invoice}
+            />
+          </label>
+          <button className="primary icon-button" disabled={busy || !invoiceReady} onClick={() => onRun(invoice)} type="button">
+            {busy ? <Loader2 className="spin" size={16} /> : <PlayCircle size={16} />}
+            {busy ? "Sending invoice" : "Send and record"}
           </button>
         </div>
       </article>
@@ -745,33 +757,34 @@ function PeerDemoView({
         </div>
         <dl className="demo-proof-list">
           <div>
-            <dt>Node A</dt>
+            <dt>Sender</dt>
             <dd>{result ? shortHash(result.nodes.a.pubkey) : "pending"}</dd>
           </div>
           <div>
-            <dt>Node B</dt>
-            <dd>{result ? shortHash(result.nodes.b.pubkey) : "pending"}</dd>
-          </div>
-          <div>
-            <dt>Channel</dt>
-            <dd>{result ? shortHash(result.channel.channelId) : "pending"}</dd>
-          </div>
-          <div>
-            <dt>Outpoint</dt>
-            <dd>{result ? shortHash(result.channel.outpoint) : "pending"}</dd>
+            <dt>Invoice</dt>
+            <dd>{result ? shortHash(result.invoice.address) : "pending"}</dd>
           </div>
           <div>
             <dt>Payment</dt>
             <dd>{result ? shortHash(result.payment.hash) : "pending"}</dd>
           </div>
           <div>
+            <dt>Status</dt>
+            <dd>{result ? result.payment.status : "pending"}</dd>
+          </div>
+          <div>
+            <dt>Fee</dt>
+            <dd>{result ? result.payment.fee : "pending"}</dd>
+          </div>
+          <div>
             <dt>FiberIR</dt>
             <dd>{result ? result.fiberIr.results.map((item) => item.action).join(" -> ") : "pending"}</dd>
           </div>
         </dl>
-        {result ? (
+        {result?.payment.failure ? <p className="demo-failure">{result.payment.failure}</p> : null}
+        {result && recordedIncident ? (
           <div className="detail-actions">
-            <button className="primary icon-button" onClick={onOpenIncidentFeed} type="button">
+            <button className="primary icon-button" onClick={() => onOpenIncidentFeed(result)} type="button">
               <Database size={16} />
               Open recorded incident
             </button>
@@ -1342,7 +1355,8 @@ function normalizePeerDemoResult(value: unknown): PeerDemoResult {
   const rawSteps = Array.isArray(record.steps) ? record.steps : [];
 
   return {
-    mode: textValue(record.mode, "verified_replay") === "live_probe" ? "live_probe" : "verified_replay",
+    mode:
+      textValue(record.mode, "live_invoice_payment") === "verified_replay" ? "verified_replay" : "live_invoice_payment",
     runId: textValue(record.runId, ""),
     nodes: {
       a: nodeA,
@@ -1355,12 +1369,14 @@ function normalizePeerDemoResult(value: unknown): PeerDemoResult {
     },
     invoice: {
       asset: textValue(invoice?.asset, "Fibt"),
-      amount: textValue(invoice?.amount, "1000000")
+      amount: textValue(invoice?.amount, "1000000"),
+      address: textValue(invoice?.address, "")
     },
     payment: {
       hash: textValue(payment?.hash, ""),
       status: textValue(payment?.status, "Unknown"),
-      fee: textValue(payment?.fee, "0x0")
+      fee: textValue(payment?.fee, "0x0"),
+      failure: textValue(payment?.failure, "")
     },
     steps: rawSteps.map(normalizePeerDemoStep).filter(Boolean),
     fiberIr: {
@@ -1391,11 +1407,13 @@ function normalizePeerDemoNode(record: Record<string, unknown> | null, fallbackN
 function normalizePeerDemoStep(value: unknown): PeerDemoStep {
   const record = asRecord(value);
   const status = textValue(record?.status, "complete");
+  const normalizedStatus =
+    status === "pending" || status === "active" || status === "recorded" || status === "verified" ? status : "complete";
   return {
     id: textValue(record?.id, "step"),
     title: textValue(record?.title, "Step"),
     detail: textValue(record?.detail, ""),
-    status: status === "recorded" || status === "verified" ? status : "complete"
+    status: normalizedStatus
   };
 }
 
