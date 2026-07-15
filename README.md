@@ -44,29 +44,6 @@ npm run demo:fixture
 If the API is not running, the dashboard falls back to local fixture data. You
 can force that mode with `http://127.0.0.1:5173/?demo=1`.
 
-## Submission Run
-
-For a production-style single service that serves both the API and dashboard:
-
-```bash
-npm ci
-npm run verify
-npm run build
-FIR_DASHBOARD_DIST=dashboard/dist FIR_STORE_FILE=.data/fiber-ir-incidents.json npm start
-```
-
-Then open `http://127.0.0.1:8787/?demo=1`, or seed the API-backed flow:
-
-```bash
-FIR_API_URL=http://127.0.0.1:8787 npm run demo:fixture
-```
-
-Deployment details are in `DEPLOYMENT.md`; the reviewer checklist is in
-`SUBMISSION.md`.
-
-Hosted demo: `https://fiber-ir-604bdd.fly.dev/`
-Tester peer-transfer demo: `https://fiber-ir-604bdd.fly.dev/?section=demo`
-
 ## Live Fiber Smoke
 
 If a Fiber Network Node JSON-RPC endpoint is running locally:
@@ -87,10 +64,6 @@ temporary unfunded testnet key. It confirmed:
 - `list_payments` returned an empty payment list
 
 Funded payment/channel operations are intentionally outside the default demo.
-The funded two-peer path has also been verified; see
-`LIVE_PEER_TRANSFER.md`.
-The dashboard includes a no-terminal tester flow at `/?section=demo` that records
-the verified A to B transfer path through FiberIR.
 
 ## Architecture
 
@@ -135,8 +108,6 @@ Current expected suite:
 - Vitest covers classifier behavior, API ingestion/status persistence, and
   Fiber JSON-RPC wrapper edge cases.
 - Dashboard production build succeeds.
-
-`npm run verify` runs the full pre-submission gate.
 
 ## Production Integration
 
