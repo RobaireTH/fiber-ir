@@ -1,12 +1,20 @@
 import {
   Activity,
   AlertCircle,
+  BarChart3,
   CheckCircle2,
   Database,
+  GitBranch,
+  Link2,
   Loader2,
+  PlayCircle,
   RefreshCcw,
+  ReceiptText,
   RotateCcw,
   Search,
+  Send,
+  Server,
+  Settings,
   ShieldCheck,
   WifiOff
 } from "lucide-react";
@@ -16,6 +24,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 
 type DashboardSource = "api" | "fixture";
+type DashboardSection = "incidents" | "trends" | "settings" | "demo";
 type IncidentStatus = "OPEN" | "RETRYING" | "RESOLVED" | "FAILED" | "IGNORED" | string;
 
 type DashboardSummary = {
@@ -75,6 +84,62 @@ type ActionState = {
   incidentId: string;
   status: IncidentStatus;
 };
+
+type PeerDemoStepStatus = "pending" | "active" | "complete" | "recorded" | "verified";
+
+type PeerDemoStep = {
+  id: string;
+  title: string;
+  detail: string;
+  status: PeerDemoStepStatus;
+};
+
+type PeerDemoResult = {
+  mode: "verified_replay" | "live_probe";
+  runId: string;
+  nodes: {
+    a: PeerDemoNode;
+    b: PeerDemoNode;
+  };
+  channel: {
+    channelId: string;
+    outpoint: string;
+    state: string;
+  };
+  invoice: {
+    asset: string;
+    amount: string;
+  };
+  payment: {
+    hash: string;
+    status: string;
+    fee: string;
+  };
+  steps: PeerDemoStep[];
+  fiberIr: {
+    failureEventId: string;
+    successEventId: string;
+    eventEndpoint: string;
+    results: Array<{
+      eventId: string;
+      action: string;
+      incidentId?: string;
+    }>;
+  };
+};
+
+type PeerDemoNode = {
+  name: string;
+  rpcUrl: string;
+  pubkey: string;
+  address: string;
+};
+
+type PeerDemoState =
+  | { status: "idle" }
+  | { status: "running"; mode: "verified_replay" | "live_probe"; stepIndex: number }
+  | { status: "success"; result: PeerDemoResult }
+  | { status: "error"; message: string };
 
 const FIXTURE_INCIDENTS: unknown[] = [
   {
@@ -172,14 +237,74 @@ const SOURCE_LABELS: Record<DashboardSource, string> = {
   api: "API live",
   fixture: "Fixture fallback"
 };
+const SECTION_COPY: Record<DashboardSection, { title: string; detail: string }> = {
+  incidents: {
+    title: "Fiber payment incidents",
+    detail: "Investigate failures, evidence, remediation, and retry outcomes."
+  },
+  trends: {
+    title: "Incident trends",
+    detail: "Review failure classes, severity mix, provenance, and resolution posture."
+  },
+  settings: {
+    title: "Integration settings",
+    detail: "Check API wiring, storage mode, event endpoints, and deployment runtime."
+  },
+  demo: {
+    title: "Peer transfer demo",
+    detail: "Run the A to B channel and payment flow through FiberIR."
+  }
+};
+const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_FIR_API_BASE_URL);
+const DEFAULT_PEER_DEMO_STEPS: PeerDemoStep[] = [
+  {
+    id: "nodes",
+    title: "Fiber peers A and B",
+    detail: "Two Fiber Network Nodes are selected for the transfer.",
+    status: "pending"
+  },
+  {
+    id: "connect",
+    title: "Peer connection",
+    detail: "Node A connects to node B over Fiber P2P.",
+    status: "pending"
+  },
+  {
+    id: "channel",
+    title: "Channel opened",
+    detail: "A private one-way channel is opened and waits for readiness.",
+    status: "pending"
+  },
+  {
+    id: "invoice",
+    title: "Invoice created on B",
+    detail: "Node B creates the payment invoice.",
+    status: "pending"
+  },
+  {
+    id: "payment",
+    title: "Payment sent from A to B",
+    detail: "Node A pays B through the ready channel.",
+    status: "pending"
+  },
+  {
+    id: "fiber-ir",
+    title: "FiberIR recorded the outcome",
+    detail: "FiberIR stores the failed preflight and resolves it with the success event.",
+    status: "pending"
+  }
+];
+const PEER_DEMO_STEP_DELAY_MS = 850;
 
 function App() {
   const [loadState, setLoadState] = useState<LoadState>({ status: "loading" });
+  const [section, setSection] = useState<DashboardSection>(() => initialDashboardSection());
   const [reloadKey, setReloadKey] = useState(0);
   const [selectedId, setSelectedId] = useState<string>("");
   const [query, setQuery] = useState("");
   const [actionState, setActionState] = useState<ActionState | null>(null);
   const [actionError, setActionError] = useState("");
+  const [peerDemoState, setPeerDemoState] = useState<PeerDemoState>({ status: "idle" });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -216,6 +341,7 @@ function App() {
 
   const incidents = loadState.status === "ready" ? loadState.data.incidents : [];
   const summary = loadState.status === "ready" ? loadState.data.summary : null;
+  const sectionCopy = SECTION_COPY[section];
   const filteredIncidents = useMemo(() => filterIncidents(incidents, query), [incidents, query]);
   const selectedIncident = filteredIncidents.find((incident) => incident.id === selectedId) ?? filteredIncidents[0] ?? null;
 
@@ -265,6 +391,34 @@ function App() {
     setReloadKey((key) => key + 1);
   }
 
+  async function runPeerDemo(mode: "verified_replay" | "live_probe") {
+    setPeerDemoState({ status: "running", mode, stepIndex: 0 });
+    setActionError("");
+
+    try {
+      for (let stepIndex = 0; stepIndex < DEFAULT_PEER_DEMO_STEPS.length; stepIndex += 1) {
+        setPeerDemoState({ status: "running", mode, stepIndex });
+        await wait(PEER_DEMO_STEP_DELAY_MS);
+      }
+
+      const path = mode === "live_probe" ? "/v1/demo/peer-transfer?live=1" : "/v1/demo/peer-transfer";
+      const result = normalizePeerDemoResult(await postJson(path, {}));
+      setPeerDemoState({ status: "success", result });
+      reload();
+    } catch (error) {
+      setPeerDemoState({
+        status: "error",
+        message: error instanceof Error ? error.message : "Unable to run the peer transfer demo."
+      });
+    }
+  }
+
+  function openDemoIncidentFeed() {
+    reload();
+    setSection("incidents");
+    setQuery("CHANNEL_NOT_READY");
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -273,9 +427,22 @@ function App() {
           <span>Diagnostics API</span>
         </div>
         <nav aria-label="Dashboard sections">
-          <a className="active">Incidents</a>
-          <a>Trends</a>
-          <a>Settings</a>
+          <button className={section === "incidents" ? "active" : ""} onClick={() => setSection("incidents")} type="button">
+            <Database size={16} />
+            Incidents
+          </button>
+          <button className={section === "trends" ? "active" : ""} onClick={() => setSection("trends")} type="button">
+            <BarChart3 size={16} />
+            Trends
+          </button>
+          <button className={section === "demo" ? "active" : ""} onClick={() => setSection("demo")} type="button">
+            <PlayCircle size={16} />
+            Peer demo
+          </button>
+          <button className={section === "settings" ? "active" : ""} onClick={() => setSection("settings")} type="button">
+            <Settings size={16} />
+            Settings
+          </button>
         </nav>
         <p>Collector: RPC wrapper online</p>
       </aside>
@@ -283,8 +450,8 @@ function App() {
       <main>
         <header className="topbar">
           <div>
-            <h1>Fiber payment incidents</h1>
-            <p>Investigate failures, evidence, remediation, and retry outcomes.</p>
+            <h1>{sectionCopy.title}</h1>
+            <p>{sectionCopy.detail}</p>
           </div>
           <div className="topbar-actions">
             {loadState.status === "ready" ? (
@@ -317,48 +484,33 @@ function App() {
           <ApiErrorState message={loadState.message} onRetry={reload} />
         ) : (
           <>
-            <section className="metrics" aria-label="Incident summary">
-              <Metric icon={<Database />} label="Total" value={String(summary?.total ?? 0)} />
-              <Metric icon={<Activity />} label="Open" value={String(summary?.open ?? 0)} />
-              <Metric icon={<ShieldCheck />} label="High/Critical" value={String(summary?.highSeverity ?? 0)} />
-              <Metric icon={<CheckCircle2 />} label="Resolved" value={String(summary?.resolved ?? 0)} />
-            </section>
+            <SummaryMetrics summary={summary} />
 
-            <section className="toolbar">
-              <label className="search-field">
-                <Search size={18} />
-                <input
-                  aria-label="Filter incidents"
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Filter by payment, class, node, status"
-                  value={query}
-                />
-              </label>
-              <div className="toolbar-status">
-                <span>{incidents.length} loaded</span>
-                <span>{filteredIncidents.length} shown</span>
-              </div>
-            </section>
-
-            {incidents.length === 0 ? (
-              <EmptyState title="No incidents found" detail="The API returned an empty incident list." onRetry={reload} />
-            ) : filteredIncidents.length === 0 ? (
-              <EmptyState title="No matching incidents" detail="No loaded incidents match the current filter." onRetry={() => setQuery("")} />
+            {section === "incidents" ? (
+              <IncidentWorkspace
+                actionState={actionState}
+                filteredIncidents={filteredIncidents}
+                incidents={incidents}
+                onClearQuery={() => setQuery("")}
+                onQueryChange={setQuery}
+                onReload={reload}
+                onSelectIncident={(incident) => setSelectedId(incident.id)}
+                onUpdateStatus={updateIncidentStatus}
+                query={query}
+                selectedIncident={selectedIncident}
+                selectedId={selectedIncident?.id ?? ""}
+              />
+            ) : section === "trends" ? (
+              <TrendsView incidents={incidents} summary={summary} />
+            ) : section === "demo" ? (
+              <PeerDemoView
+                dataSource={loadState.data.source}
+                onOpenIncidentFeed={openDemoIncidentFeed}
+                onRun={runPeerDemo}
+                state={peerDemoState}
+              />
             ) : (
-              <section className="incident-grid">
-                <IncidentList
-                  incidents={filteredIncidents}
-                  selectedId={selectedIncident?.id ?? ""}
-                  onSelect={(incident) => setSelectedId(incident.id)}
-                />
-                {selectedIncident ? (
-                  <IncidentDetail
-                    actionState={actionState}
-                    incident={selectedIncident}
-                    onUpdateStatus={updateIncidentStatus}
-                  />
-                ) : null}
-              </section>
+              <SettingsView data={loadState.data} />
             )}
           </>
         )}
@@ -437,6 +589,399 @@ function EmptyState({ title, detail, onRetry }: { title: string; detail: string;
         Refresh
       </button>
     </section>
+  );
+}
+
+function SummaryMetrics({ summary }: { summary: DashboardSummary | null }) {
+  return (
+    <section className="metrics" aria-label="Incident summary">
+      <Metric icon={<Database />} label="Total" value={String(summary?.total ?? 0)} />
+      <Metric icon={<Activity />} label="Open" value={String(summary?.open ?? 0)} />
+      <Metric icon={<ShieldCheck />} label="High/Critical" value={String(summary?.highSeverity ?? 0)} />
+      <Metric icon={<CheckCircle2 />} label="Resolved" value={String(summary?.resolved ?? 0)} />
+    </section>
+  );
+}
+
+function IncidentWorkspace({
+  actionState,
+  filteredIncidents,
+  incidents,
+  onClearQuery,
+  onQueryChange,
+  onReload,
+  onSelectIncident,
+  onUpdateStatus,
+  query,
+  selectedIncident,
+  selectedId
+}: {
+  actionState: ActionState | null;
+  filteredIncidents: IncidentView[];
+  incidents: IncidentView[];
+  onClearQuery: () => void;
+  onQueryChange: (query: string) => void;
+  onReload: () => void;
+  onSelectIncident: (incident: IncidentView) => void;
+  onUpdateStatus: (incident: IncidentView, nextStatus: IncidentStatus) => void;
+  query: string;
+  selectedIncident: IncidentView | null;
+  selectedId: string;
+}) {
+  return (
+    <>
+      <section className="toolbar">
+        <label className="search-field">
+          <Search size={18} />
+          <input
+            aria-label="Filter incidents"
+            onChange={(event) => onQueryChange(event.target.value)}
+            placeholder="Filter by payment, class, node, status"
+            value={query}
+          />
+        </label>
+        <div className="toolbar-status">
+          <span>{incidents.length} loaded</span>
+          <span>{filteredIncidents.length} shown</span>
+        </div>
+      </section>
+
+      {incidents.length === 0 ? (
+        <EmptyState title="No incidents found" detail="The API returned an empty incident list." onRetry={onReload} />
+      ) : filteredIncidents.length === 0 ? (
+        <EmptyState title="No matching incidents" detail="No loaded incidents match the current filter." onRetry={onClearQuery} />
+      ) : (
+        <section className="incident-grid">
+          <IncidentList incidents={filteredIncidents} selectedId={selectedId} onSelect={onSelectIncident} />
+          {selectedIncident ? (
+            <IncidentDetail actionState={actionState} incident={selectedIncident} onUpdateStatus={onUpdateStatus} />
+          ) : null}
+        </section>
+      )}
+    </>
+  );
+}
+
+function PeerDemoView({
+  dataSource,
+  onOpenIncidentFeed,
+  onRun,
+  state
+}: {
+  dataSource: DashboardSource;
+  onOpenIncidentFeed: () => void;
+  onRun: (mode: "verified_replay" | "live_probe") => void;
+  state: PeerDemoState;
+}) {
+  const busy = state.status === "running";
+  const result = state.status === "success" ? state.result : null;
+  const steps = stepsForPeerDemoState(state);
+  const flowState =
+    state.status === "running"
+      ? `running ${Math.min(state.stepIndex + 1, DEFAULT_PEER_DEMO_STEPS.length)}/${DEFAULT_PEER_DEMO_STEPS.length}`
+      : result
+        ? result.mode.replace("_", " ")
+        : "not run";
+
+  return (
+    <section className="peer-demo-grid" aria-label="Peer transfer demo">
+      <article className="peer-demo-panel peer-demo-hero">
+        <div>
+          <div className="section-heading">
+            <strong>A to B transfer</strong>
+            <span>{dataSource === "api" ? "FiberIR API" : "fixture view"}</span>
+          </div>
+          <h2>Open channel, pay invoice, record outcome</h2>
+          <p>
+            Hosted testers get a guided verified replay of the completed A to B transfer. Local API environments can
+            probe already-running FNN peers with the live button.
+          </p>
+        </div>
+        <div className="peer-demo-actions">
+          <button className="primary icon-button" disabled={busy} onClick={() => onRun("verified_replay")} type="button">
+            {busy && state.mode === "verified_replay" ? <Loader2 className="spin" size={16} /> : <PlayCircle size={16} />}
+            {busy && state.mode === "verified_replay" ? "Running flow" : "Run guided demo"}
+          </button>
+          <button className="secondary icon-button" disabled={busy} onClick={() => onRun("live_probe")} type="button">
+            {busy && state.mode === "live_probe" ? <Loader2 className="spin" size={16} /> : <Server size={16} />}
+            Probe live peers
+          </button>
+        </div>
+      </article>
+
+      {state.status === "error" ? (
+        <section className="notice notice-error peer-demo-notice">
+          <AlertCircle size={18} />
+          <span>{state.message}</span>
+        </section>
+      ) : null}
+
+      <article className="peer-demo-panel">
+        <div className="section-heading">
+          <strong>Flow</strong>
+          <span>{flowState}</span>
+        </div>
+        <div className="demo-timeline">
+          {steps.map((step, index) => (
+            <div className={`demo-step demo-step-row-${cssToken(step.status)}`} key={step.id}>
+              <span className={`demo-step-icon demo-step-${cssToken(step.status)}`}>
+                <DemoStepIcon id={step.id} />
+              </span>
+              <div>
+                <strong>
+                  {index + 1}. {step.title}
+                </strong>
+                <p>{step.detail}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </article>
+
+      <article className="peer-demo-panel">
+        <div className="section-heading">
+          <strong>Proof</strong>
+          <span>{busy ? "running" : result ? result.payment.status : "not run"}</span>
+        </div>
+        <dl className="demo-proof-list">
+          <div>
+            <dt>Node A</dt>
+            <dd>{result ? shortHash(result.nodes.a.pubkey) : "pending"}</dd>
+          </div>
+          <div>
+            <dt>Node B</dt>
+            <dd>{result ? shortHash(result.nodes.b.pubkey) : "pending"}</dd>
+          </div>
+          <div>
+            <dt>Channel</dt>
+            <dd>{result ? shortHash(result.channel.channelId) : "pending"}</dd>
+          </div>
+          <div>
+            <dt>Outpoint</dt>
+            <dd>{result ? shortHash(result.channel.outpoint) : "pending"}</dd>
+          </div>
+          <div>
+            <dt>Payment</dt>
+            <dd>{result ? shortHash(result.payment.hash) : "pending"}</dd>
+          </div>
+          <div>
+            <dt>FiberIR</dt>
+            <dd>{result ? result.fiberIr.results.map((item) => item.action).join(" -> ") : "pending"}</dd>
+          </div>
+        </dl>
+        {result ? (
+          <div className="detail-actions">
+            <button className="primary icon-button" onClick={onOpenIncidentFeed} type="button">
+              <Database size={16} />
+              Open recorded incident
+            </button>
+          </div>
+        ) : null}
+      </article>
+    </section>
+  );
+}
+
+function DemoStepIcon({ id }: { id: string }) {
+  switch (id) {
+    case "nodes":
+      return <Server size={16} />;
+    case "connect":
+      return <Link2 size={16} />;
+    case "channel":
+      return <GitBranch size={16} />;
+    case "invoice":
+      return <ReceiptText size={16} />;
+    case "payment":
+      return <Send size={16} />;
+    default:
+      return <CheckCircle2 size={16} />;
+  }
+}
+
+function stepsForPeerDemoState(state: PeerDemoState): PeerDemoStep[] {
+  if (state.status === "success") return state.result.steps;
+
+  if (state.status !== "running") return DEFAULT_PEER_DEMO_STEPS;
+
+  return DEFAULT_PEER_DEMO_STEPS.map((step, index) => {
+    if (index < state.stepIndex) {
+      return {
+        ...step,
+        status: index === DEFAULT_PEER_DEMO_STEPS.length - 1 ? "recorded" : "complete"
+      };
+    }
+
+    if (index === state.stepIndex) {
+      return {
+        ...step,
+        status: "active"
+      };
+    }
+
+    return step;
+  });
+}
+
+function TrendsView({ incidents, summary }: { incidents: IncidentView[]; summary: DashboardSummary | null }) {
+  const statusCounts = sortedCounts(countBy(incidents, (incident) => incident.incidentStatus));
+  const classCounts = sortedCounts(countBy(incidents, (incident) => incident.normalizedClass));
+  const severityCounts = sortedCounts(countBy(incidents, (incident) => incident.severity));
+  const provenanceCounts = sortedCounts(countBy(incidents, (incident) => sourceSummary(incident.provenance)));
+  const resolutionRate = incidents.length ? Math.round(((summary?.resolved ?? 0) / incidents.length) * 100) : 0;
+  const latestIncident = incidents[0];
+
+  if (incidents.length === 0) {
+    return <EmptyState title="No trend data" detail="Trend panels will populate after incidents are ingested." onRetry={() => undefined} />;
+  }
+
+  return (
+    <section className="analytics-grid" aria-label="Incident trend analysis">
+      <article className="analytics-panel hero-panel">
+        <div className="section-heading">
+          <strong>Resolution posture</strong>
+          <span>{incidents.length} incidents</span>
+        </div>
+        <div className="resolution-meter" aria-label={`${resolutionRate}% resolved`}>
+          <span style={{ width: `${resolutionRate}%` }} />
+        </div>
+        <div className="resolution-copy">
+          <strong>{resolutionRate}% resolved</strong>
+          <span>{summary?.open ?? 0} still open or retrying</span>
+        </div>
+      </article>
+
+      <BarList title="Failure classes" items={classCounts} total={incidents.length} />
+      <BarList title="Incident status" items={statusCounts} total={incidents.length} />
+      <BarList title="Severity mix" items={severityCounts} total={incidents.length} />
+      <BarList title="Evidence source" items={provenanceCounts} total={incidents.length} />
+
+      <article className="analytics-panel">
+        <div className="section-heading">
+          <strong>Latest incident</strong>
+          <span>{latestIncident ? formatDate(latestIncident.occurredAt) : "None"}</span>
+        </div>
+        {latestIncident ? (
+          <dl className="compact-facts">
+            <div>
+              <dt>Class</dt>
+              <dd>{latestIncident.normalizedClass}</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd>{latestIncident.incidentStatus}</dd>
+            </div>
+            <div>
+              <dt>Payment</dt>
+              <dd>{latestIncident.paymentId}</dd>
+            </div>
+            <div>
+              <dt>Remediation</dt>
+              <dd>{latestIncident.remediation.title}</dd>
+            </div>
+          </dl>
+        ) : null}
+      </article>
+    </section>
+  );
+}
+
+function SettingsView({ data }: { data: DashboardData }) {
+  const apiBase = API_BASE_URL || "same origin";
+  const dashboardMode = data.source === "api" ? "API-backed" : "fixture fallback";
+  const endpoints = [
+    "POST /v1/events",
+    "POST /v1/demo/peer-transfer",
+    "GET /v1/incidents",
+    "PATCH /v1/incidents/:id",
+    "GET /v1/stats/summary"
+  ];
+
+  return (
+    <section className="settings-grid" aria-label="Integration settings">
+      <article className="settings-panel">
+        <div className="section-heading">
+          <strong>Runtime</strong>
+          <span>{dashboardMode}</span>
+        </div>
+        <dl className="compact-facts">
+          <div>
+            <dt>API base</dt>
+            <dd>{apiBase}</dd>
+          </div>
+          <div>
+            <dt>Data source</dt>
+            <dd>{SOURCE_LABELS[data.source]}</dd>
+          </div>
+          <div>
+            <dt>Store</dt>
+            <dd>{data.source === "api" ? "Server repository" : "Browser fixture"}</dd>
+          </div>
+        </dl>
+      </article>
+
+      <article className="settings-panel">
+        <div className="section-heading">
+          <strong>API contract</strong>
+          <span>fiber-ir.event.v1</span>
+        </div>
+        <div className="endpoint-list">
+          {endpoints.map((endpoint) => (
+            <span className="endpoint" key={endpoint}>
+              {endpoint}
+            </span>
+          ))}
+        </div>
+      </article>
+
+      <article className="settings-panel wide-panel">
+        <div className="section-heading">
+          <strong>Integration handoff</strong>
+          <span>Wallet, merchant, node service</span>
+        </div>
+        <div className="handoff-grid">
+          <div>
+            <Server size={18} />
+            <strong>Record payment outcomes</strong>
+            <p>Submit terminal Fiber payment events to keep the incident feed current.</p>
+          </div>
+          <div>
+            <ShieldCheck size={18} />
+            <strong>Preserve provenance</strong>
+            <p>Label fields as live, inferred, fixture, or mock so operators can trust the evidence.</p>
+          </div>
+          <div>
+            <RefreshCcw size={18} />
+            <strong>Close the loop</strong>
+            <p>Send retry success events or patch status when an operator resolves an incident.</p>
+          </div>
+        </div>
+      </article>
+    </section>
+  );
+}
+
+function BarList({ title, items, total }: { title: string; items: Array<[string, number]>; total: number }) {
+  return (
+    <article className="analytics-panel">
+      <div className="section-heading">
+        <strong>{title}</strong>
+        <span>{total} total</span>
+      </div>
+      <div className="bar-list">
+        {items.map(([label, count]) => (
+          <div className="bar-row" key={label}>
+            <div>
+              <span>{label}</span>
+              <strong>{count}</strong>
+            </div>
+            <div className="bar-track">
+              <span style={{ width: `${Math.max(6, Math.round((count / total) * 100))}%` }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </article>
   );
 }
 
@@ -641,7 +1186,7 @@ async function requestJson(path: string, signal: AbortSignal): Promise<unknown> 
   let response: Response;
 
   try {
-    response = await fetch(path, {
+    response = await fetch(apiUrl(path), {
       headers: { accept: "application/json" },
       signal
     });
@@ -675,7 +1220,8 @@ async function requestJson(path: string, signal: AbortSignal): Promise<unknown> 
 }
 
 async function patchIncidentStatus(id: string, incidentStatus: IncidentStatus, resolutionNote: string): Promise<unknown> {
-  const response = await fetch(`/v1/incidents/${encodeURIComponent(id)}`, {
+  const path = `/v1/incidents/${encodeURIComponent(id)}`;
+  const response = await fetch(apiUrl(path), {
     method: "PATCH",
     headers: {
       accept: "application/json",
@@ -688,6 +1234,24 @@ async function patchIncidentStatus(id: string, incidentStatus: IncidentStatus, r
 
   if (!response.ok) {
     throw new ApiResponseError(`/v1/incidents/${id} returned HTTP ${response.status}.`, response.status);
+  }
+
+  return body.trim() ? JSON.parse(body) : null;
+}
+
+async function postJson(path: string, payload: unknown): Promise<unknown> {
+  const response = await fetch(apiUrl(path), {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  const body = await response.text();
+
+  if (!response.ok) {
+    throw new ApiResponseError(`${path} returned HTTP ${response.status}.`, response.status);
   }
 
   return body.trim() ? JSON.parse(body) : null;
@@ -763,6 +1327,78 @@ function normalizeSummary(value: unknown, incidents: IncidentView[]): DashboardS
   };
 }
 
+function normalizePeerDemoResult(value: unknown): PeerDemoResult {
+  const record = asRecord(value);
+  if (!record) throw new ApiResponseError("Demo endpoint returned an invalid response.");
+
+  const nodes = asRecord(record.nodes);
+  const nodeA = normalizePeerDemoNode(asRecord(nodes?.a), "node-a");
+  const nodeB = normalizePeerDemoNode(asRecord(nodes?.b), "node-b");
+  const channel = asRecord(record.channel);
+  const invoice = asRecord(record.invoice);
+  const payment = asRecord(record.payment);
+  const fiberIr = asRecord(record.fiberIr);
+  const rawResults = Array.isArray(fiberIr?.results) ? fiberIr.results : [];
+  const rawSteps = Array.isArray(record.steps) ? record.steps : [];
+
+  return {
+    mode: textValue(record.mode, "verified_replay") === "live_probe" ? "live_probe" : "verified_replay",
+    runId: textValue(record.runId, ""),
+    nodes: {
+      a: nodeA,
+      b: nodeB
+    },
+    channel: {
+      channelId: textValue(channel?.channelId, ""),
+      outpoint: textValue(channel?.outpoint, ""),
+      state: textValue(channel?.state, "")
+    },
+    invoice: {
+      asset: textValue(invoice?.asset, "Fibt"),
+      amount: textValue(invoice?.amount, "1000000")
+    },
+    payment: {
+      hash: textValue(payment?.hash, ""),
+      status: textValue(payment?.status, "Unknown"),
+      fee: textValue(payment?.fee, "0x0")
+    },
+    steps: rawSteps.map(normalizePeerDemoStep).filter(Boolean),
+    fiberIr: {
+      failureEventId: textValue(fiberIr?.failureEventId, ""),
+      successEventId: textValue(fiberIr?.successEventId, ""),
+      eventEndpoint: textValue(fiberIr?.eventEndpoint, "/v1/events"),
+      results: rawResults.map((item) => {
+        const result = asRecord(item);
+        return {
+          eventId: textValue(result?.eventId, ""),
+          action: textValue(result?.action, "stored"),
+          incidentId: textValue(result?.incidentId, "")
+        };
+      })
+    }
+  };
+}
+
+function normalizePeerDemoNode(record: Record<string, unknown> | null, fallbackName: string): PeerDemoNode {
+  return {
+    name: textValue(record?.name, fallbackName),
+    rpcUrl: textValue(record?.rpcUrl, ""),
+    pubkey: textValue(record?.pubkey, ""),
+    address: textValue(record?.address, "")
+  };
+}
+
+function normalizePeerDemoStep(value: unknown): PeerDemoStep {
+  const record = asRecord(value);
+  const status = textValue(record?.status, "complete");
+  return {
+    id: textValue(record?.id, "step"),
+    title: textValue(record?.title, "Step"),
+    detail: textValue(record?.detail, ""),
+    status: status === "recorded" || status === "verified" ? status : "complete"
+  };
+}
+
 function deriveSummary(incidents: IncidentView[]): DashboardSummary {
   return incidents.reduce(
     (summary, incident) => {
@@ -835,6 +1471,21 @@ function summarizeRawError(value: unknown): string {
   }
 }
 
+function countBy<T>(items: T[], getKey: (item: T) => string): Map<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const item of items) {
+    const key = getKey(item);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+
+  return counts;
+}
+
+function sortedCounts(counts: Map<string, number>): Array<[string, number]> {
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+}
+
 function formatDate(value: string): string {
   if (!value) return "Time unavailable";
 
@@ -847,6 +1498,18 @@ function formatDate(value: string): string {
     hour: "2-digit",
     minute: "2-digit"
   }).format(date);
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, milliseconds);
+  });
+}
+
+function shortHash(value: string): string {
+  if (!value) return "pending";
+  if (value.length <= 18) return value;
+  return `${value.slice(0, 10)}...${value.slice(-6)}`;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -882,6 +1545,20 @@ function isUnavailableHttpResponse(status: number, body: string): boolean {
 
 function isDemoMode(): boolean {
   return new URLSearchParams(window.location.search).get("demo") === "1";
+}
+
+function initialDashboardSection(): DashboardSection {
+  const section = new URLSearchParams(window.location.search).get("section");
+  return section === "trends" || section === "settings" || section === "demo" ? section : "incidents";
+}
+
+function apiUrl(path: string): string {
+  return `${API_BASE_URL}${path}`;
+}
+
+function normalizeApiBaseUrl(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.trim().replace(/\/+$/, "");
 }
 
 function cssToken(value: string): string {
