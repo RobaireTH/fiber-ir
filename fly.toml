@@ -6,6 +6,8 @@ primary_region = "iad"
 
 [env]
   FIR_DASHBOARD_DIST = "/app/dashboard/dist"
+  FIR_DEMO_SENDER_RPC_URL = "http://fiber-ir-fnn-a-604bdd.internal:18227"
+  FIR_DEMO_SENDER_P2P_ADDR = "/dns4/fiber-ir-fnn-a-604bdd.fly.dev/tcp/8228/p2p/Qmf7j9K5GUDsXjrMh86yfAmhhJFTxnNUUpnBRu9rnwN7Tc"
   FIR_STORE_FILE = "/data/incidents.json"
   PORT = "8787"
 

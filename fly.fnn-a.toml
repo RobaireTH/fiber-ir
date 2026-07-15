@@ -1,0 +1,37 @@
+app = "fiber-ir-fnn-a-604bdd"
+primary_region = "iad"
+
+[build]
+  dockerfile = "fiber-node/Dockerfile"
+
+[env]
+  FIBER_HOME = "/fiber"
+  FIBER_LISTENING_ADDR = "/ip6/::/tcp/8228"
+  FIBER_ANNOUNCE_LISTENING_ADDR = "true"
+  FIBER_ANNOUNCE_PRIVATE_ADDR = "true"
+  FIBER_ANNOUNCED_ADDRS = "/dns4/fiber-ir-fnn-a-604bdd.fly.dev/tcp/8228"
+  FIBER_ANNOUNCED_NODE_NAME = "fiber-ir-fnn-a"
+  FIR_FNN_RPC_PORT = "8227"
+  FIR_FNN_INTERNAL_RPC_PORT = "18227"
+  RPC_LISTENING_ADDR = "127.0.0.1:8227"
+  CKB_NODE_RPC_URL = "https://testnet.ckbapp.dev/"
+
+[[mounts]]
+  source = "fiber_ir_fnn_a"
+  destination = "/fiber"
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8228
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[services.ports]]
+    port = 8228
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"
