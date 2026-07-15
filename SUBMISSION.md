@@ -5,7 +5,7 @@
 Hosted demo:
 
 - Dashboard: `https://fiber-ir-604bdd.fly.dev/`
-- Peer transfer demo: `https://fiber-ir-604bdd.fly.dev/?section=demo`
+- Invoice sender demo: `https://fiber-ir-604bdd.fly.dev/?section=demo`
 - Health: `https://fiber-ir-604bdd.fly.dev/healthz`
 - Incidents API: `https://fiber-ir-604bdd.fly.dev/v1/incidents`
 
@@ -27,7 +27,9 @@ FIR_API_URL=http://127.0.0.1:8787 npm run demo:fixture
 - Versioned Fiber incident event contract in `shared/src/index.ts`.
 - Deterministic classification and remediation catalog in `classifier/src`.
 - Fiber JSON-RPC client and read-only FNN smoke path in `collector/src`.
-- Live two-peer Fiber transfer proof in `LIVE_PEER_TRANSFER.md`.
+- Live invoice sender route in `api/src/routes/demo.ts`, which calls Fiber
+  `send_payment` and records the actual node result.
+- Local two-peer Fiber transfer proof in `LIVE_PEER_TRANSFER.md`.
 - Ingestion, incident lifecycle, summary stats, and JSON-file persistence in `api/src`.
 - React triage dashboard in `dashboard/src`.
 
